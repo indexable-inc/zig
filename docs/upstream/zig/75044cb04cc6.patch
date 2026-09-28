@@ -1,0 +1,52 @@
+From 75044cb04cc67454db98ed7c054081806c3830c6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Proch=C3=A1zka?= <pjanv42@gmail.com>
+Date: Sun, 16 Aug 2026 12:47:05 +0200
+Subject: [PATCH] llvm: synchronize target initialization
+
+---
+ src/codegen/llvm.zig | 11 +++++++++--
+ src/link/Lld.zig     |  2 +-
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index 9c54defbfe..8bb33f83e0 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -847,7 +847,7 @@ pub const Object = struct {
+                 return diags.fail("emitting without libllvm not implemented", .{});
+             }
+ 
+-            initializeLLVMTarget(comp.root_mod.resolved_target.result.cpu.arch);
++            initializeLLVMTarget(io, comp.root_mod.resolved_target.result.cpu.arch);
+ 
+             const context: *bindings.Context = .create();
+             errdefer context.dispose();
+@@ -4811,7 +4811,14 @@ const struct_layout_version = 2;
+ //       https://github.com/llvm/llvm-project/issues/56585/ is fixed
+ pub const optional_layout_version = 3;
+ 
+-pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
++var target_registry_mutex: std.Io.Mutex = .init;
++
++pub fn initializeLLVMTarget(io: Io, arch: std.Target.Cpu.Arch) void {
++    // Repeated initialization is safe, as targets which have already been registered will be skipped.
++    // It is however the client's responsibility to synchronize registry access.
++    target_registry_mutex.lockUncancelable(io);
++    defer target_registry_mutex.unlock(io);
++
+     switch (arch) {
+         .aarch64, .aarch64_be => {
+             bindings.LLVMInitializeAArch64Target();
+diff --git a/src/link/Lld.zig b/src/link/Lld.zig
+index 1ac882f2d9..6a4d8db174 100644
+--- a/src/link/Lld.zig
++++ b/src/link/Lld.zig
+@@ -341,7 +341,7 @@ fn linkAsArchive(lld: *Lld, arena: Allocator) link.Error!void {
+     const llvm_bindings = @import("../codegen/llvm/bindings.zig");
+     const llvm = @import("../codegen/llvm.zig");
+     const target = &comp.root_mod.resolved_target.result;
+-    llvm.initializeLLVMTarget(target.cpu.arch);
++    llvm.initializeLLVMTarget(comp.io, target.cpu.arch);
+     var err_file_index: usize = undefined;
+     var err_msg: [*:0]u8 = undefined;
+     if (llvm_bindings.WriteArchive(

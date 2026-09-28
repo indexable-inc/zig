@@ -1,0 +1,40 @@
+From: Jan Procházka <pjanv42@gmail.com>
+Subject: [PATCH] llvm: synchronize target initialization
+
+Backport of ziglang/zig 75044cb04cc67454db98ed7c054081806c3830c6
+(https://codeberg.org/ziglang/zig/commit/75044cb04cc67454db98ed7c054081806c3830c6,
+closes https://codeberg.org/ziglang/zig/issues/36490) to the 0.15.2 tag
+(e4cbd752c8c05f131051f8c873cff7823177d7d3). The upstream commit is kept
+verbatim in docs/upstream/zig/.
+
+LLVM's target registry is a process-global linked list with no locking of
+its own. Concurrent sub-compilations (compiler_rt, libzigc, ubsan_rt, libc++)
+each call initializeLLVMTarget on their own thread, so one can look its
+target up while another is still registering, and LLVMGetTargetFromTriple
+then reports "No available targets are compatible with triple".
+
+Adapted, not cherry-picked: master's version takes an `std.Io` and locks an
+`std.Io.Mutex`; 0.15.2 predates `std.Io`, so this locks a `std.Thread.Mutex`
+and keeps the one-argument signature. Every 0.15.2 caller
+(src/codegen/llvm.zig emit, src/link/Lld.zig linkAsArchive, src/main.zig
+cmdDumpLlvmInts) is therefore unchanged. Apply with -p1 inside zig/.
+
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index bd2c7bd0..767bb810 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -13000,7 +13000,14 @@ fn constraintAllowsRegister(constraint: []const u8) bool {
+     } else return false;
+ }
+ 
++var target_registry_mutex: std.Thread.Mutex = .{};
++
+ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
++    // Repeated initialization is safe, as targets which have already been registered will be skipped.
++    // It is however the client's responsibility to synchronize registry access.
++    target_registry_mutex.lock();
++    defer target_registry_mutex.unlock();
++
+     switch (arch) {
+         .aarch64, .aarch64_be => {
+             llvm.LLVMInitializeAArch64Target();
